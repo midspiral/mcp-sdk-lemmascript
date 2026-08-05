@@ -1,3 +1,5 @@
+//@ backend dafny
+
 /**
  * Probe outcome classifier (pure module): maps the outcome of the connect-time
  * `server/discover` probe onto one of four verdicts — modern era, the
@@ -23,6 +25,16 @@ import {
     SdkHttpError,
     UnsupportedProtocolVersionError
 } from '@modelcontextprotocol/core-internal';
+
+// Proof-only projections for values whose runtime implementations live outside
+// LemmaScript's fragment. Error construction is havoced below; the classifier
+// still reasons about the verdict fields it actually uses.
+//@ declare-type Error { name: string, message: string }
+//@ declare-type SdkError = Error
+//@ declare-type SdkHttpError = Error
+//@ declare-type UnsupportedProtocolVersionError = Error
+//@ declare-type DiscoverResult { supportedVersions: string[] }
+//@ declare-type ParsedDiscoverResult { ok: boolean, value: DiscoverResult }
 
 /**
  * The runtime environment the probe executed in. Only consulted for the
@@ -126,6 +138,15 @@ const NOT_PROBE_RECOGNIZED = new Set([-32_001, -32_020, -32_021]);
  * retry state live in the caller.
  */
 export function classifyProbeOutcome(outcome: ProbeOutcome, context: ProbeClassifierContext): ProbeVerdict {
+    //@ verify
+    //@ contract Modern and corrective verdicts can only arise from their corresponding evidence-bearing probe outcomes; auth and transport failures retain their policy-prescribed error/legacy routing.
+    //@ ensures \result.kind === "modern" ==> outcome.kind === "result"
+    //@ ensures \result.kind === "corrective" ==> outcome.kind === "rpc-error" || outcome.kind === "http-error"
+    //@ ensures outcome.kind === "auth-required" ==> \result.kind === "error"
+    //@ ensures outcome.kind === "timeout" && context.transportKind === "stdio" ==> \result.kind === "legacy"
+    //@ ensures outcome.kind === "timeout" && context.transportKind === "http" ==> \result.kind === "error"
+    //@ ensures outcome.kind === "closed" && context.transportKind === "stdio" ==> \result.kind === "legacy"
+    //@ ensures outcome.kind === "closed" && context.transportKind === "http" ==> \result.kind === "error"
     switch (outcome.kind) {
         case 'result': {
             return classifyResult(outcome.result, context);
@@ -158,7 +179,10 @@ export function classifyProbeOutcome(outcome: ProbeOutcome, context: ProbeClassi
             }
             // On HTTP a mid-probe close is an ambiguous network condition — the
             // same typed connect error as any probe transport failure.
-            return classifyNetworkError(new Error('Connection closed during the version negotiation probe'), context);
+            //@ havoc : unknown
+            const closeError = new Error('Connection closed during the version negotiation probe');
+            //@ assume !isOpaqueFetchTypeError(closeError)
+            return classifyNetworkError(closeError, context);
         }
         case 'timeout': {
             if (context.transportKind === 'stdio') {
@@ -171,6 +195,7 @@ export function classifyProbeOutcome(outcome: ProbeOutcome, context: ProbeClassi
             // On HTTP a deployed server answers, so silence is an outage, not a
             // legacy signal: keep the typed timeout error (the compatibility
             // matrix keys the HTTP legacy signal to a 4xx, never to silence).
+            //@ havoc SdkError
             return {
                 kind: 'error',
                 error: new SdkError(SdkErrorCode.RequestTimeout, `Version negotiation probe timed out after ${outcome.timeoutMs}ms`, {
@@ -182,11 +207,17 @@ export function classifyProbeOutcome(outcome: ProbeOutcome, context: ProbeClassi
 }
 
 function classifyResult(result: unknown, context: ProbeClassifierContext): ProbeVerdict {
+    //@ verify
+    //@ ensures \result.kind !== "corrective"
+    //@ ensures \result.kind === "modern" ==> context.clientModernVersions.includes(\result.version)
+    //@ ensures \result.kind === "modern" ==> \result.discover.supportedVersions.includes(\result.version)
+    //@ ensures \result.kind === "error" ==> !context.fallbackAvailable
     // The 2026 wire schema carries the spec receiver-side leniency for
     // `resultType` ('complete'), `ttlMs` (0) and `cacheScope` ('private'), so
     // routing through the codec is behavior-neutral with the prior public-schema
     // parse for absent and malformed cache hints (`.catch()` per spec receiver
     // leniency): a server that omits or malforms them still classifies `modern`.
+    //@ havoc : ParsedDiscoverResult
     const parsed = codecForVersion(MODERN_WIRE_REVISION).validateResult('server/discover', result);
     if (!parsed.ok) {
         // Unrecognized result shape: not modern evidence — conservative legacy fallback.
@@ -202,6 +233,7 @@ function classifyResult(result: unknown, context: ProbeClassifierContext): Probe
     if (context.fallbackAvailable) {
         return { kind: 'legacy' };
     }
+    //@ havoc UnsupportedProtocolVersionError
     return {
         kind: 'error',
         error: new UnsupportedProtocolVersionError({ supported: [...supportedVersions], requested: context.requestedVersion })
@@ -209,16 +241,28 @@ function classifyResult(result: unknown, context: ProbeClassifierContext): Probe
 }
 
 function classifyRpcError(outcome: { code: number; message: string; data?: unknown }, context: ProbeClassifierContext): ProbeVerdict {
+    //@ verify
+    //@ type outcome ProbeOutcome
+    //@ requires outcome.kind === "rpc-error"
+    //@ contract Only -32022 errors can trigger corrective continuation; every other RPC error is conservatively legacy, and a corrective version comes from the client's preference list.
+    //@ ensures outcome.code !== -32022 ==> \result.kind === "legacy"
+    //@ ensures \result.kind !== "modern"
+    //@ ensures \result.kind === "corrective" ==> outcome.code === -32022
+    //@ ensures \result.kind === "corrective" ==> context.clientModernVersions.includes(\result.version)
     const { code, message, data } = outcome;
 
     if (code === UNSUPPORTED_PROTOCOL_VERSION) {
+        //@ havoc : string[] | undefined
         const supported = parseSupportedList(data);
         if (supported === undefined) {
             // -32022 without a valid data.supported list is not actionable modern evidence.
             return { kind: 'legacy' };
         }
+        //@ havoc : string
         const requested = parseRequested(data) ?? context.requestedVersion;
+        //@ havoc : UnsupportedProtocolVersionError
         const error = new UnsupportedProtocolVersionError({ supported, requested }, message);
+        //@ havoc : string[]
         const supportedModern = modernProtocolVersions(supported);
         const mutual = context.clientModernVersions.find(version => supportedModern.includes(version));
         if (mutual !== undefined) {
@@ -234,6 +278,8 @@ function classifyRpcError(outcome: { code: number; message: string; data?: unkno
         return context.fallbackAvailable ? { kind: 'legacy' } : { kind: 'error', error };
     }
 
+    // Proof model: decision-neutral; this branch and the fallthrough both return legacy.
+    //@ skip
     if (NOT_PROBE_RECOGNIZED.has(code)) {
         return { kind: 'legacy' };
     }
@@ -244,6 +290,11 @@ function classifyRpcError(outcome: { code: number; message: string; data?: unkno
 }
 
 function classifyHttpError(outcome: { status: number; body?: string; statusText?: string }, context: ProbeClassifierContext): ProbeVerdict {
+    //@ verify
+    //@ type outcome ProbeOutcome
+    //@ requires outcome.kind === "http-error"
+    //@ ensures \result.kind !== "modern"
+    //@ ensures outcome.status === 401 || outcome.status === 403 || outcome.status >= 500 ==> \result.kind === "error"
     // Auth statuses are never era evidence, and a 401/403 body is the auth
     // layer's, not the server/discover handler's — this row ranks above the
     // JSON-RPC body parse. Parallel to the auth-required row: a typed failure
@@ -255,6 +306,7 @@ function classifyHttpError(outcome: { status: number; body?: string; statusText?
     // bug at the fleet level.
     if (outcome.status === 401 || outcome.status === 403) {
         const isDenial = outcome.status === 403;
+        //@ havoc SdkHttpError
         return {
             kind: 'error',
             error: new SdkHttpError(
@@ -275,6 +327,7 @@ function classifyHttpError(outcome: { status: number; body?: string; statusText?
         // handler's -32603, neither a server/discover verdict). The spec keys
         // the HTTP legacy signal to client-error rejections (a 2025 server
         // answers the unknown probe 4xx), never to 5xx.
+        //@ havoc SdkHttpError
         return {
             kind: 'error',
             error: new SdkHttpError(
@@ -289,8 +342,12 @@ function classifyHttpError(outcome: { status: number; body?: string; statusText?
         };
     }
     // HTTP-rejected probes carry their JSON-RPC error in the response body — classify it like an in-band error.
+    //@ havoc : ProbeOutcome | undefined
     const rpcError = parseJsonRpcErrorBody(outcome.body);
     if (rpcError !== undefined) {
+        // The parser result is represented as the corresponding union variant
+        // in the proof model; its runtime object omits this normalized tag.
+        //@ assume rpcError.kind === "rpc-error"
         return classifyRpcError(rpcError, context);
     }
     // Unparseable or unrecognized 4xx rejection: conservative legacy fallback.
@@ -301,6 +358,10 @@ function classifyHttpError(outcome: { status: number; body?: string; statusText?
 }
 
 function classifyNetworkError(error: unknown, context: ProbeClassifierContext): ProbeVerdict {
+    //@ verify
+    //@ ensures \result.kind !== "modern" && \result.kind !== "corrective"
+    //@ ensures context.environment === "node" ==> \result.kind === "error"
+    //@ ensures !isOpaqueFetchTypeError(error) ==> \result.kind === "error"
     if (context.environment === 'browser' && isOpaqueFetchTypeError(error)) {
         // A browser CORS-preflight rejection against a deployed 2025 server is
         // an opaque TypeError. The legacy fallback also preflights (its JSON
@@ -309,6 +370,7 @@ function classifyNetworkError(error: unknown, context: ProbeClassifierContext): 
         // where the probe's 2026 headers could not.
         return { kind: 'legacy' };
     }
+    //@ havoc SdkError
     return {
         kind: 'error',
         error: new SdkError(SdkErrorCode.EraNegotiationFailed, `Version negotiation probe failed: ${describeError(error)}`, {
@@ -317,6 +379,7 @@ function classifyNetworkError(error: unknown, context: ProbeClassifierContext): 
     };
 }
 
+//@ extern
 function isOpaqueFetchTypeError(error: unknown): boolean {
     // Cross-realm safe: a bundled or sandboxed fetch may not share this realm's TypeError identity.
     return error instanceof TypeError || (error instanceof Error && error.name === 'TypeError');
