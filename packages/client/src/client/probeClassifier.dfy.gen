@@ -32,6 +32,10 @@ datatype DiscoverResult = DiscoverResult(supportedVersions: seq<string>)
 
 datatype ParsedDiscoverResult = ParsedDiscoverResult(ok: bool, value: DiscoverResult)
 
+datatype RpcErrorOutcome = RpcErrorOutcome(code: int, message: string, data: Option<Unknown>)
+
+datatype HttpErrorOutcome = HttpErrorOutcome(status: int, body: Option<string>, statusText: Option<string>)
+
 datatype ProbeEnvironment = node | browser
 
 datatype ProbeTransportKind = stdio | http
@@ -58,10 +62,10 @@ method classifyProbeOutcome(outcome: ProbeOutcome, context: ProbeClassifierConte
       var i_t0 := classifyResult(i_outcome_result, context);
       return i_t0;
     case rpc_error(i_outcome_code, i_outcome_message, i_outcome_data) =>
-      var i_t1 := classifyRpcError(outcome, context);
+      var i_t1 := classifyRpcError(RpcErrorOutcome(i_outcome_code, i_outcome_message, i_outcome_data), context);
       return i_t1;
     case http_error(i_outcome_status, i_outcome_body, i_outcome_statusText) =>
-      var i_t2 := classifyHttpError(outcome, context);
+      var i_t2 := classifyHttpError(HttpErrorOutcome(i_outcome_status, i_outcome_body, i_outcome_statusText), context);
       return i_t2;
     case network_error(i_outcome_error) =>
       var i_t3 := classifyNetworkError(i_outcome_error, context);
@@ -110,11 +114,10 @@ method classifyResult(result: Unknown, context: ProbeClassifierContext) returns 
   return ProbeVerdict.error(i_t6);
 }
 
-method classifyRpcError(outcome: ProbeOutcome, context: ProbeClassifierContext) returns (res: ProbeVerdict)
-  requires outcome.rpc_error?
-  ensures ((outcome.code != -32022) ==> res.legacy?)
+method classifyRpcError(outcome: RpcErrorOutcome, context: ProbeClassifierContext) returns (res: ProbeVerdict)
+  ensures ((outcome.code != UNSUPPORTED_PROTOCOL_VERSION) ==> res.legacy?)
   ensures (!res.modern?)
-  ensures (match res { case corrective(i_result_version, i_result_error) => (outcome.code == -32022) case _ => true })
+  ensures (match res { case corrective(i_result_version, i_result_error) => (outcome.code == UNSUPPORTED_PROTOCOL_VERSION) case _ => true })
   ensures (match res { case corrective(i_result_version, i_result_error) => (i_result_version in context.clientModernVersions) case _ => true })
 {
   var code := outcome.code;
@@ -145,8 +148,7 @@ method classifyRpcError(outcome: ProbeOutcome, context: ProbeClassifierContext) 
   return ProbeVerdict.legacy;
 }
 
-method classifyHttpError(outcome: ProbeOutcome, context: ProbeClassifierContext) returns (res: ProbeVerdict)
-  requires outcome.http_error?
+method classifyHttpError(outcome: HttpErrorOutcome, context: ProbeClassifierContext) returns (res: ProbeVerdict)
   ensures (!res.modern?)
   ensures ((((outcome.status == 401) || (outcome.status == 403)) || (outcome.status >= 500)) ==> res.error?)
 {
@@ -159,10 +161,9 @@ method classifyHttpError(outcome: ProbeOutcome, context: ProbeClassifierContext)
     var i_t8: Error := *;
     return ProbeVerdict.error(i_t8);
   }
-  var rpcError: Option<ProbeOutcome> := *;
+  var rpcError: Option<RpcErrorOutcome> := *;
   match rpcError {
     case Some(i_rpcError_val) =>
-      assume {:axiom} i_rpcError_val.rpc_error?;
       var i_t9 := classifyRpcError(i_rpcError_val, context);
       return i_t9;
     case None =>

@@ -2,7 +2,7 @@
 
 [![LemmaScript verified](https://img.shields.io/github/actions/workflow/status/midspiral/mcp-sdk-lemmascript/lemmascript.yml?branch=lemmascript&label=LemmaScript%20verified)](https://github.com/midspiral/mcp-sdk-lemmascript/actions/workflows/lemmascript.yml)
 
-Fork of [modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk) with the connect-time probe classifier verified **in place** using [LemmaScript](https://github.com/midspiral/LemmaScript)'s Dafny backend. Five production functions in `packages/client/src/client/probeClassifier.ts` are checked with 8 Dafny verification obligations and 0 errors. The classifier remains in its production module; no clean-room verification copy or `autohavoc` is used.
+Fork of [modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk) with the connect-time probe classifier verified **in place** using [LemmaScript](https://github.com/midspiral/LemmaScript)'s Dafny backend. Five production functions in `packages/client/src/client/probeClassifier.ts` are checked with 6 Dafny verification obligations and 0 errors. The classifier remains in its production module; no clean-room verification copy or `autohavoc` is used.
 
 The production decision logic is unchanged. The only executable edit names the ordinary `Error` created for an HTTP close in a local variable, so the adjacent havoc and assumption can refer to it; evaluation and the returned value are the same as in the original direct call.
 
@@ -35,9 +35,9 @@ The codec call itself is havoced, so this proves the selection and fallback logi
 
 For `classifyRpcError`:
 
-- Any code other than `-32022` returns `legacy`.
+- Any code other than `UNSUPPORTED_PROTOCOL_VERSION` (`-32022`) returns `legacy`.
 - The function never returns `modern`.
-- A `corrective` verdict implies code `-32022` and selects a version from `context.clientModernVersions`.
+- A `corrective` verdict implies code `UNSUPPORTED_PROTOCOL_VERSION` and selects a version from `context.clientModernVersions`.
 
 The `NOT_PROBE_RECOGNIZED.has(code)` branch is the sole `//@ skip`. Both that branch and its fallthrough return `legacy`, so omitting the membership test preserves the modeled return behavior while avoiding verification of JavaScript `Set` construction and lookup.
 
@@ -50,10 +50,10 @@ The `NOT_PROBE_RECOGNIZED.has(code)` branch is the sole `//@ skip`. Both that br
 There is no `autohavoc`. Each unsupported expression is named at its source location:
 
 - The external discover codec's projected result is havoced; overlap selection after that boundary is verified.
-- The structurally narrowed RPC/HTTP helper parameters are represented as their enclosing `ProbeOutcome` union variants in Dafny and guarded by variant preconditions. This is a nominal proof-model adaptation, not a runtime cast.
+- The RPC and HTTP helpers use exact proof-only record projections matching their untagged TypeScript parameter shapes. When a `ProbeOutcome` arm calls one of those helpers, LemmaScript constructs the corresponding nominal Dafny record from the arm's match-bound fields; the helper contracts require no fictional `kind` tag.
 - `parseSupportedList`, `parseRequested`, and `modernProtocolVersions` are havoced. Consequently, the proof covers the control-flow consequences of their outputs, not those helpers' parsing/filtering correctness.
 - SDK error construction is havoced. Error payload contents and concrete error subclasses are outside the proof; the surrounding verdict tags are verified.
-- The HTTP JSON-RPC parser result is havoced and immediately assumed to be the RPC-error union variant when present. This represents the parser's untagged runtime record in the Dafny union model.
+- The HTTP JSON-RPC parser result is havoced as the exact untagged `RpcErrorOutcome` record when present. No union tag or tag assumption is introduced.
 - `isOpaqueFetchTypeError` is an uninterpreted `//@ extern` predicate because its implementation uses `instanceof`. The ordinary `Error` synthesized for an HTTP close is havoced and assumed not to satisfy that predicate.
 - Only the decision-neutral `NOT_PROBE_RECOGNIZED` membership branch is skipped.
 
@@ -90,7 +90,7 @@ cd ../LemmaScript && npm install && cd -
 Expected result:
 
 ```text
-Dafny program verifier finished with 8 verified, 0 errors
+Dafny program verifier finished with 6 verified, 0 errors
 ```
 
 For a single-file regeneration after changing annotations:
@@ -102,11 +102,13 @@ node ../LemmaScript/tools/dist/lsc.js regen --backend=dafny \
 
 ## LemmaScript improvements found by the case study
 
-The in-place extraction exposed three backend name-generation bugs, each now covered by `examples/nameClash.ts` in LemmaScript:
+The in-place extraction exposed three backend name-generation bugs, now covered by `examples/nameClash.ts` and the structural-projection regression in `examples/spec.ts`:
 
 - A payload-bearing implication such as `\result.kind === "modern" ==> ...` used the raw `\result` spelling in a match binder, producing an invalid Dafny identifier. Match-binder prefixes are now sanitized.
-- Hyphenated discriminants such as `"rpc-error"` were escaped in datatype declarations but not discriminator predicates. Dafny produced a subtraction expression instead of `rpc_error?`, while Lean emitted `.rpc-error` instead of `.«rpc-error»`.
+- Hyphenated discriminants such as `"rpc-error"` must be escaped consistently in declarations, predicates, patterns, and payload extractors. Dafny otherwise produced a subtraction expression instead of `rpc_error?`, while Lean emitted `.rpc-error` instead of `.«rpc-error»`.
 - A union constructor and local payload variable can share a source name (`error(error)`). Constructors are now datatype-qualified when their emitted name is already occupied.
+
+It also exposed a structural-lowering gap, now covered in `examples/spec.ts`: TypeScript allows a narrowed tagged-union arm to be passed to a helper whose parameter is an untagged structural record. LemmaScript now projects the match-bound arm fields into that nominal backend record instead of requiring the helper to pretend it accepts the enclosing union.
 
 ## Next steps
 

@@ -35,6 +35,8 @@ import {
 //@ declare-type UnsupportedProtocolVersionError = Error
 //@ declare-type DiscoverResult { supportedVersions: string[] }
 //@ declare-type ParsedDiscoverResult { ok: boolean, value: DiscoverResult }
+//@ declare-type RpcErrorOutcome { code: number, message: string, data: unknown | undefined }
+//@ declare-type HttpErrorOutcome { status: number, body: string | undefined, statusText: string | undefined }
 
 /**
  * The runtime environment the probe executed in. Only consulted for the
@@ -242,12 +244,11 @@ function classifyResult(result: unknown, context: ProbeClassifierContext): Probe
 
 function classifyRpcError(outcome: { code: number; message: string; data?: unknown }, context: ProbeClassifierContext): ProbeVerdict {
     //@ verify
-    //@ type outcome ProbeOutcome
-    //@ requires outcome.kind === "rpc-error"
+    //@ type outcome RpcErrorOutcome
     //@ contract Only -32022 errors can trigger corrective continuation; every other RPC error is conservatively legacy, and a corrective version comes from the client's preference list.
-    //@ ensures outcome.code !== -32022 ==> \result.kind === "legacy"
+    //@ ensures outcome.code !== UNSUPPORTED_PROTOCOL_VERSION ==> \result.kind === "legacy"
     //@ ensures \result.kind !== "modern"
-    //@ ensures \result.kind === "corrective" ==> outcome.code === -32022
+    //@ ensures \result.kind === "corrective" ==> outcome.code === UNSUPPORTED_PROTOCOL_VERSION
     //@ ensures \result.kind === "corrective" ==> context.clientModernVersions.includes(\result.version)
     const { code, message, data } = outcome;
 
@@ -291,8 +292,7 @@ function classifyRpcError(outcome: { code: number; message: string; data?: unkno
 
 function classifyHttpError(outcome: { status: number; body?: string; statusText?: string }, context: ProbeClassifierContext): ProbeVerdict {
     //@ verify
-    //@ type outcome ProbeOutcome
-    //@ requires outcome.kind === "http-error"
+    //@ type outcome HttpErrorOutcome
     //@ ensures \result.kind !== "modern"
     //@ ensures outcome.status === 401 || outcome.status === 403 || outcome.status >= 500 ==> \result.kind === "error"
     // Auth statuses are never era evidence, and a 401/403 body is the auth
@@ -342,12 +342,9 @@ function classifyHttpError(outcome: { status: number; body?: string; statusText?
         };
     }
     // HTTP-rejected probes carry their JSON-RPC error in the response body — classify it like an in-band error.
-    //@ havoc : ProbeOutcome | undefined
+    //@ havoc : RpcErrorOutcome | undefined
     const rpcError = parseJsonRpcErrorBody(outcome.body);
     if (rpcError !== undefined) {
-        // The parser result is represented as the corresponding union variant
-        // in the proof model; its runtime object omits this normalized tag.
-        //@ assume rpcError.kind === "rpc-error"
         return classifyRpcError(rpcError, context);
     }
     // Unparseable or unrecognized 4xx rejection: conservative legacy fallback.
