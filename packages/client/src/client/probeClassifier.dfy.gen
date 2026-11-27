@@ -58,20 +58,20 @@ method classifyProbeOutcome(outcome: ProbeOutcome, context: ProbeClassifierConte
   ensures (outcome.closed? ==> context.transportKind.http? ==> res.error?)
 {
   match outcome {
-    case result(i_outcome_result) =>
-      var i_t0 := classifyResult(i_outcome_result, context);
+    case result(_) =>
+      var i_t0 := classifyResult(outcome.result, context);
       return i_t0;
-    case rpc_error(i_outcome_code, i_outcome_message, i_outcome_data) =>
-      var i_t1 := classifyRpcError(RpcErrorOutcome(i_outcome_code, i_outcome_message, i_outcome_data), context);
+    case rpc_error(_, _, _) =>
+      var i_t1 := classifyRpcError(RpcErrorOutcome(outcome.code, outcome.message, outcome.data), context);
       return i_t1;
-    case http_error(i_outcome_status, i_outcome_body, i_outcome_statusText) =>
-      var i_t2 := classifyHttpError(HttpErrorOutcome(i_outcome_status, i_outcome_body, i_outcome_statusText), context);
+    case http_error(_, _, _) =>
+      var i_t2 := classifyHttpError(HttpErrorOutcome(outcome.status, outcome.body, outcome.statusText), context);
       return i_t2;
-    case network_error(i_outcome_error) =>
-      var i_t3 := classifyNetworkError(i_outcome_error, context);
+    case network_error(_) =>
+      var i_t3 := classifyNetworkError(outcome.error_network_error, context);
       return i_t3;
-    case auth_required(i_outcome_error) =>
-      return ProbeVerdict.error(i_outcome_error);
+    case auth_required(_) =>
+      return ProbeVerdict.error(outcome.error_auth_required);
     case closed =>
       if context.transportKind.stdio? {
         return ProbeVerdict.legacy;
@@ -80,7 +80,7 @@ method classifyProbeOutcome(outcome: ProbeOutcome, context: ProbeClassifierConte
       assume {:axiom} !(isOpaqueFetchTypeError(closeError));
       var i_t4 := classifyNetworkError(closeError, context);
       return i_t4;
-    case timeout(i_outcome_timeoutMs) =>
+    case timeout(_) =>
       if context.transportKind.stdio? {
         return ProbeVerdict.legacy;
       }
